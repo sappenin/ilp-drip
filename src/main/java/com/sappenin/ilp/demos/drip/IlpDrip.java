@@ -16,7 +16,6 @@ import org.interledger.spsp.client.SimpleSpspClient;
 import org.interledger.spsp.client.SpspClient;
 import org.interledger.stream.Denominations;
 import org.interledger.stream.SendMoneyRequest;
-import org.interledger.stream.SendMoneyResult;
 import org.interledger.stream.sender.FixedSenderAmountPaymentTracker;
 import org.interledger.stream.sender.SimpleStreamSender;
 
@@ -51,12 +50,9 @@ public class IlpDrip {
   private static final InterledgerAddress OPERATOR_ADDRESS
     = InterledgerAddress.of("private.com.sappenin.ilp.drip.application~send-only");
 
-  /**
-   * @param args
-   *
-   * @throws ExecutionException
-   * @throws InterruptedException
-   */
+  // Create SimpleStreamSender for sending STREAM payments
+  private static SimpleStreamSender SIMPLE_STREAM_SENDER;
+
   public static void main(String[] args) throws ExecutionException, InterruptedException {
 
     try {
@@ -71,13 +67,13 @@ public class IlpDrip {
       final HttpUrl testNetUrl
         = HttpUrl.parse("https://prod.wc.wallet.xpring.io/accounts/" + senderAccountUsername + "/ilp");
 
-      final String senderAccountToken = Optional.ofNullable(args[1])
+      final String senderAuthToken = Optional.ofNullable(args[1])
         .map(val -> {
           LOGGER.debug("Arg1 = `" + val + "`");
           return val;
         })
         .map(String::trim)
-        .orElseThrow(() -> new IllegalStateException("Arg1 must contain a valid ILP account token."));
+        .orElseThrow(() -> new IllegalStateException("Arg1 must contain a valid ILP auth token."));
 
       final PaymentPointer receiver1 = Optional.ofNullable(args[2])
         .map(val -> {
@@ -94,16 +90,16 @@ public class IlpDrip {
 
       final SpspClient spspClient = new SimpleSpspClient();
 
+      // Use ILP over HTTP for our underlying link
+      final Link link = newIlpOverHttpLink(testNetUrl, senderAuthToken);
+
+      // Create SimpleStreamSender for sending STREAM payments
+      SIMPLE_STREAM_SENDER = new SimpleStreamSender(link);
+
       while (true) {
-        sendMoney(spspClient, receiver1, testNetUrl, senderAccountToken);
-        receiver2.ifPresent(destPaymentPointer -> {
-          try {
-            sendMoney(spspClient, destPaymentPointer, testNetUrl, senderAccountToken);
-          } catch (InterruptedException | ExecutionException e) {
-            throw new RuntimeException(e.getMessage(), e);
-          }
-        });
-        Thread.sleep(10000); // Sleep 5 seconds.
+        sendMoney(spspClient, receiver1);
+        receiver2.ifPresent(destPaymentPointer -> sendMoney(spspClient, destPaymentPointer));
+        Thread.sleep(3000); // Sleep 1 seconds.
       }
     } catch (Exception e) {
       displayUsage();
@@ -122,19 +118,11 @@ public class IlpDrip {
 
   private static void sendMoney(
     final SpspClient spspClient,
-    final PaymentPointer receiverPaymentPointer,
-    final HttpUrl testNetUrl,
-    final String senderAuthToken
-  ) throws ExecutionException, InterruptedException {
+    final PaymentPointer receiverPaymentPointer
+  ) {
 
     // Fetch shared secret and destination address using SPSP client
     final StreamConnectionDetails connectionDetails = spspClient.getStreamConnectionDetails(receiverPaymentPointer);
-
-    // Use ILP over HTTP for our underlying link
-    Link link = newIlpOverHttpLink(testNetUrl, senderAuthToken);
-
-    // Create SimpleStreamSender for sending STREAM payments
-    final SimpleStreamSender simpleStreamSender = new SimpleStreamSender(link);
 
     // This is 1 drop when scale=9
     //final long ONE_DROP_IN_SCALE_9 = 1000;
@@ -143,7 +131,8 @@ public class IlpDrip {
     final long ONE_THOUSAND_DROPS_IN_SCALE_9 = 1000_000;
 
     // Send payment using STREAM
-    final SendMoneyResult result = simpleStreamSender.sendMoney(
+    //final SendMoneyResult result =
+    SIMPLE_STREAM_SENDER.sendMoney(
       SendMoneyRequest.builder()
         .amount(UnsignedLong.valueOf(ONE_THOUSAND_DROPS_IN_SCALE_9))
         .denomination(Denominations.XRP_MILLI_DROPS)
@@ -152,15 +141,14 @@ public class IlpDrip {
         .paymentTracker(new FixedSenderAmountPaymentTracker(UnsignedLong.valueOf(ONE_THOUSAND_DROPS_IN_SCALE_9)))
         .sharedSecret(SharedSecret.of(connectionDetails.sharedSecret().value()))
         .build()
-    ).get();
-
-    LOGGER.info(
-      "\n=======\n"
-        + "SUCCESS\n"
-        + "=======\n"
-        + "Send money result: " + result
-        + "\n"
-    );
+    ).whenComplete((sendMoneyResult, throwable) -> {
+      LOGGER.info(
+        "\n=======\n"
+          + "SUCCESS\n"
+          + "=======\n"
+          + "Send money result: " + sendMoneyResult
+          + "\n");
+    });
   }
 
   private static Link newIlpOverHttpLink(final HttpUrl testNetUrl, final String senderAuthToken) {
