@@ -6,6 +6,7 @@ import org.interledger.codecs.ilp.InterledgerCodecContextFactory;
 import org.interledger.core.InterledgerAddress;
 import org.interledger.core.SharedSecret;
 import org.interledger.link.Link;
+import org.interledger.link.LinkId;
 import org.interledger.link.http.IlpOverHttpLink;
 import org.interledger.link.http.auth.SimpleBearerTokenSupplier;
 import org.interledger.quilt.jackson.InterledgerModule;
@@ -16,6 +17,7 @@ import org.interledger.spsp.client.SimpleSpspClient;
 import org.interledger.spsp.client.SpspClient;
 import org.interledger.stream.Denominations;
 import org.interledger.stream.SendMoneyRequest;
+import org.interledger.stream.SendMoneyResult;
 import org.interledger.stream.sender.FixedSenderAmountPaymentTracker;
 import org.interledger.stream.sender.SimpleStreamSender;
 
@@ -37,7 +39,7 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.ExecutionException;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -53,7 +55,7 @@ public class IlpDrip {
   // Create SimpleStreamSender for sending STREAM payments
   private static SimpleStreamSender SIMPLE_STREAM_SENDER;
 
-  public static void main(String[] args) throws ExecutionException, InterruptedException {
+  public static void main(String[] args) throws InterruptedException {
 
     try {
       final String senderAccountUsername = Optional.ofNullable(args[0])
@@ -92,18 +94,29 @@ public class IlpDrip {
 
       // Use ILP over HTTP for our underlying link
       final Link link = newIlpOverHttpLink(testNetUrl, senderAuthToken);
+      link.setLinkId(LinkId.of("Xpring Sappenin Account"));
 
       // Create SimpleStreamSender for sending STREAM payments
       SIMPLE_STREAM_SENDER = new SimpleStreamSender(link);
 
       while (true) {
-        sendMoney(spspClient, receiver1);
-        receiver2.ifPresent(destPaymentPointer -> sendMoney(spspClient, destPaymentPointer));
-        Thread.sleep(3000); // Sleep 1 seconds.
+        LOGGER.info("PAYMENT LINK\n{}\n\n", link);
+
+        CompletableFuture<SendMoneyResult> firstPayment = sendMoney(spspClient, receiver1);
+        CompletableFuture<SendMoneyResult> secondPayment = receiver2
+          .map(destPaymentPointer -> sendMoney(spspClient, destPaymentPointer))
+          .orElseGet(() -> CompletableFuture.completedFuture(null));
+
+        // Wait for both to complete...
+        CompletableFuture.allOf(firstPayment, secondPayment).get();
+        LOGGER.info("\n"
+          + "$$$$$$$$$$$$$$$$$$$$$\n"
+          + "ALL PAYMENTS COMPLETE\n"
+          + "$$$$$$$$$$$$$$$$$$$$$\n"
+        );
       }
     } catch (Exception e) {
       displayUsage();
-      throw e;
     }
   }
 
@@ -116,9 +129,8 @@ public class IlpDrip {
         + "{receiver2PaymentPointer [optional]}");
   }
 
-  private static void sendMoney(
-    final SpspClient spspClient,
-    final PaymentPointer receiverPaymentPointer
+  private static CompletableFuture<SendMoneyResult> sendMoney(
+    final SpspClient spspClient, final PaymentPointer receiverPaymentPointer
   ) {
 
     // Fetch shared secret and destination address using SPSP client
@@ -131,23 +143,20 @@ public class IlpDrip {
     final long ONE_THOUSAND_DROPS_IN_SCALE_9 = 1000_000;
 
     // Send payment using STREAM
-    //final SendMoneyResult result =
-    SIMPLE_STREAM_SENDER.sendMoney(
-      SendMoneyRequest.builder()
-        .amount(UnsignedLong.valueOf(ONE_THOUSAND_DROPS_IN_SCALE_9))
-        .denomination(Denominations.XRP_MILLI_DROPS)
-        .destinationAddress(connectionDetails.destinationAddress())
-        .timeout(Duration.ofMillis(60000))
-        .paymentTracker(new FixedSenderAmountPaymentTracker(UnsignedLong.valueOf(ONE_THOUSAND_DROPS_IN_SCALE_9)))
-        .sharedSecret(SharedSecret.of(connectionDetails.sharedSecret().value()))
-        .build()
-    ).whenComplete((sendMoneyResult, throwable) -> {
-      LOGGER.info(
-        "\n=======\n"
-          + "SUCCESS\n"
-          + "=======\n"
-          + "Send money result: " + sendMoneyResult
-          + "\n");
+    final SendMoneyRequest sendMoneyRequest = SendMoneyRequest.builder()
+      .amount(UnsignedLong.valueOf(ONE_THOUSAND_DROPS_IN_SCALE_9))
+      .denomination(Denominations.XRP_MILLI_DROPS)
+      .destinationAddress(connectionDetails.destinationAddress())
+      .timeout(Duration.ofMillis(60000))
+      .paymentTracker(new FixedSenderAmountPaymentTracker(UnsignedLong.valueOf(ONE_THOUSAND_DROPS_IN_SCALE_9)))
+      .sharedSecret(SharedSecret.of(connectionDetails.sharedSecret().value()))
+      .build();
+    LOGGER
+      .info("SEND MONEY REQUEST\n{}\n\n",
+        sendMoneyRequest);
+
+    return SIMPLE_STREAM_SENDER.sendMoney(sendMoneyRequest).whenComplete((sendMoneyResult, throwable) -> {
+      LOGGER.info("SEND MONEY SUCCESS\n{}\n\n", sendMoneyResult);
     });
   }
 
